@@ -40,7 +40,7 @@
 ├── scripts/
 │   └── build-windows.ps1   # Windows 本机构建脚本
 ├── .github/workflows/
-│   └── build-windows.yml   # GitHub Actions 自动生成 Windows 安装程序
+│   └── build-desktop.yml   # 跨平台构建与 Release 发布
 ├── index.html
 ├── package.json
 └── vite.config.ts
@@ -103,6 +103,9 @@ src-tauri\target\release\bundle\nsis\*-setup.exe
 - `Mori-Windows-x64`：Windows NSIS `.exe` 安装程序
 - `Mori-macOS-arm64`：Apple Silicon Mac `.dmg`
 - `Mori-macOS-x64`：Intel Mac `.dmg`
+
+推送 `v*` 版本标签时，工作流还会自动创建 GitHub Release，并将上述三个平台的
+安装包作为长期下载附件发布。普通 `main` 分支提交只生成保留 30 天的测试产物。
 
 未配置代码签名时，系统首次启动可能显示安全提醒；这不影响安装包生成。
 
