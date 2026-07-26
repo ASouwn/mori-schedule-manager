@@ -110,6 +110,8 @@ button { color: inherit; }
 .subtasks { display: flex; flex-direction: column; gap: 5px; }
 .subtasks button { padding: 8px 6px; border: 0; background: transparent; display: flex; gap: 9px; align-items: flex-start; text-align: left; cursor: pointer; border-radius: 7px; }
 .subtasks button:hover { background: #f7f8fb; }
+.subtasks button { padding-left: calc(6px + var(--depth, 0) * 15px); }
+.tree-guide { width: 12px; flex: 0 0 12px; color: #b1b8c4; font-size: 10px; }
 .subtasks i { flex: 0 0 auto; width: 16px; height: 16px; border: 1px solid #cfd4de; border-radius: 5px; display: grid; place-items: center; font-size: 9px; font-style: normal; }
 .subtasks i.checked { background: #10a37f; border-color: #10a37f; color: white; }
 .subtasks span { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
@@ -126,13 +128,17 @@ button { color: inherit; }
 .mini-gantt { margin-top: 21px; padding-top: 17px; border-top: 1px solid var(--line); }
 .gantt-caption { display: flex; justify-content: space-between; margin-bottom: 9px; font-size: 10px; }
 .gantt-caption span { color: #9aa2b0; font-size: 8px; }
-.mini-days { margin-left: 72px; display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; color: #a0a7b3; font-size: 7px; text-align: center; }
-.mini-row { min-height: 27px; display: grid; grid-template-columns: 67px 1fr; gap: 5px; align-items: center; }
+.mini-scroll { overflow-x: auto; overflow-y: hidden; scrollbar-width: thin; scrollbar-color: #b8c2d1 #f1f3f7; }
+.mini-timeline { width: calc(130px + var(--mini-width)); min-width: 100%; }
+.mini-days { position: relative; width: var(--mini-width); height: 25px; margin-left: 130px; color: #8c96a7; font-size: 8px; }
+.mini-days span { position: absolute; top: 4px; white-space: nowrap; transform: translateX(3px); }
+.mini-row { min-height: 31px; display: grid; grid-template-columns: 122px var(--mini-width); gap: 8px; align-items: center; }
 .mini-row > span { overflow: hidden; color: #6f798a; font-size: 8px; white-space: nowrap; text-overflow: ellipsis; }
 .mini-track, .master-track { position: relative; height: 18px; background-image: linear-gradient(to right, #edf0f5 1px, transparent 1px); background-size: calc(100% / var(--cols)) 100%; }
+.mini-track { width: var(--mini-width); background-size: var(--mini-day) 100%; }
 .mini-track i { position: absolute; top: 5px; height: 8px; min-width: 4px; border-radius: 4px; opacity: .82; }
+.mini-track i.short-bar::after, .main-bar.short-bar::after { content: ""; position: absolute; inset: 0; border: 1px solid #ffffffa6; border-radius: inherit; }
 .mini-gantt.large { margin-top: 0; padding-top: 0; border-top: 0; min-width: 0; }
-.mini-gantt.large .mini-days { margin-left: 130px; font-size: 9px; }
 .mini-gantt.large .mini-row { min-height: 38px; grid-template-columns: 122px 1fr; gap: 8px; }
 .mini-gantt.large .mini-row > span { font-size: 10px; }
 .mini-gantt.large .mini-track { height: 28px; }
@@ -164,6 +170,7 @@ button { color: inherit; }
 .master-row.expanded .main-bar { top: 14px; height: 32px; display: flex; align-items: center; }
 .master-row.expanded .main-bar strong { position: absolute; left: 9px; right: 6px; color: white; font-size: 9px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .embedded-subtask { position: absolute; z-index: 2; min-width: 8px; height: 18px; padding: 3px 6px; border-radius: 5px; color: white; font-size: 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; box-shadow: 0 3px 8px #2635531c; }
+.short-task-label { position: absolute; z-index: 5; top: 27px; max-width: 120px; overflow: hidden; color: #536074; font-size: 8px; font-weight: 700; white-space: nowrap; text-overflow: ellipsis; pointer-events: none; }
 
 .body-gantt { margin-top: 17px; padding: 22px; border: 1px solid var(--line); border-radius: 13px; background: white; box-shadow: 0 7px 25px #1d2c4b0a; }
 .body-gantt-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 25px; padding-bottom: 17px; border-bottom: 1px solid var(--line); }
@@ -237,11 +244,25 @@ button { color: inherit; }
 .breakdown-head small { color: #969eac; font-size: 8px; }
 .breakdown-head button { height: 30px; padding: 0 10px; border: 1px solid #ccd5f3; border-radius: 7px; background: #f5f7ff; color: var(--blue); font-size: 9px; font-weight: 700; cursor: pointer; }
 .subtask-editor { display: flex; flex-direction: column; gap: 6px; }
-.subtask-edit-row { display: grid; grid-template-columns: 28px 1fr 127px 14px 127px 25px; gap: 6px; align-items: center; padding: 5px 7px; border: 1px solid var(--line); border-radius: 9px; background: #fafbfc; }
+.subtask-edit-row { display: grid; grid-template-columns: 28px minmax(150px, 1fr) 120px 14px 120px 116px; gap: 6px; align-items: center; padding: 5px 7px 5px calc(7px + var(--depth, 0) * 18px); border: 1px solid var(--line); border-left: 3px solid #d7def4; border-radius: 9px; background: #fafbfc; }
 .subtask-edit-row input { height: 33px; background: white; }
 .step-number { color: #a0a8b5; font-size: 9px; font-weight: 700; }
 .subtask-edit-row > span:nth-last-of-type(1) { color: #9ca3b0; font-size: 10px; text-align: center; }
 .subtask-edit-row button { border: 0; background: transparent; color: #a3aab5; cursor: pointer; font-size: 16px; }
+.subtask-edit-row button:disabled { opacity: .28; cursor: not-allowed; }
+.subtask-row-actions { display: flex; justify-content: flex-end; gap: 1px; }
+.subtask-row-actions button { width: 25px; height: 27px; border-radius: 5px; font-size: 13px; }
+.subtask-row-actions button:hover:not(:disabled) { background: #eef2ff; color: var(--blue); }
+.shift-copy-setting { margin: 2px 0 10px; padding: 10px 12px; border: 1px solid #dbe3f8; border-radius: 9px; background: #f7f9ff; flex-direction: row !important; align-items: center; }
+.shift-copy-setting input { width: 17px; height: 17px; flex: 0 0 17px; accent-color: var(--blue); }
+.shift-copy-setting span { display: flex; flex-direction: column; gap: 3px; }
+.shift-copy-setting b { color: #526078; font-size: 9px; }
+.shift-copy-setting small { color: #8a94a5; font-size: 8px; }
+.recurrence-editor { margin-top: 8px; padding: 0 12px 12px; border: 1px solid #e0e5ef; border-radius: 10px; background: #fafbfc; }
+.recurrence-editor .breakdown-head { margin-top: 0; padding-top: 11px; border-top: 0; }
+.switch-inline { flex-direction: row !important; align-items: center; color: #657085; font-size: 9px; }
+.switch-inline input { width: 16px; height: 16px; accent-color: var(--blue); }
+.recurrence-fields { display: grid; grid-template-columns: 1.2fr .8fr 1fr; gap: 8px; }
 .modal-footer { display: flex; justify-content: space-between; margin-top: 20px; padding-top: 17px; border-top: 1px solid var(--line); }
 .modal-footer > div { display: flex; gap: 8px; }
 .modal-footer button { height: 36px; padding: 0 15px; border: 1px solid #dfe3ea; border-radius: 8px; background: white; font-size: 10px; font-weight: 700; cursor: pointer; }
@@ -311,7 +332,7 @@ html, body, #root { width: 100%; height: 100%; overflow: hidden; }
 .timeline-controls > span { align-self: center; color: #a0a8b5; font-size: 8px; }
 .hidden-tasks-trigger { height: 32px !important; padding: 0 9px !important; color: #667085; font-size: 9px; }
 .hidden-tasks-trigger b { margin-left: 4px; padding: 2px 5px; border-radius: 8px; background: #eef1f6; font-size: 8px; }
-.master-gantt { min-height: 180px; flex: 1 1 55%; overflow: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: #aeb8c8 #f2f4f7; }
+.master-gantt { min-height: 118px; height: min(54vh, calc(52px + var(--task-count, 1) * 68px)); max-height: 54vh; flex: 0 0 auto; overflow: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: #aeb8c8 #f2f4f7; }
 .master-gantt::-webkit-scrollbar, .content-body::-webkit-scrollbar, .task-detail::-webkit-scrollbar, .sidebar-section::-webkit-scrollbar { width: 9px; height: 9px; }
 .master-gantt::-webkit-scrollbar-track, .content-body::-webkit-scrollbar-track, .task-detail::-webkit-scrollbar-track, .sidebar-section::-webkit-scrollbar-track { background: #f2f4f7; border-radius: 8px; }
 .master-gantt::-webkit-scrollbar-thumb, .content-body::-webkit-scrollbar-thumb, .task-detail::-webkit-scrollbar-thumb, .sidebar-section::-webkit-scrollbar-thumb { background: #bcc5d3; border: 2px solid #f2f4f7; border-radius: 8px; }
@@ -338,11 +359,21 @@ html, body, #root { width: 100%; height: 100%; overflow: hidden; }
 .range-clip.right { right: 3px; }
 .outside-bar { opacity: .6; }
 .master-row.overdue .master-task-name small { color: #d24b59; font-weight: 700; }
-.body-gantt { min-height: 190px; max-height: 43%; flex: 0 1 43%; overflow: auto; scrollbar-width: thin; scrollbar-color: #bcc5d4 #f2f4f7; }
+.body-gantt { min-height: 190px; max-height: min(46vh, 520px); flex: 0 1 auto; overflow: auto; scrollbar-width: thin; scrollbar-color: #bcc5d4 #f2f4f7; }
 .complete-task-button { width: 100%; height: 36px; margin-top: 11px; border: 0; border-radius: 8px; background: #eaf8f3; color: #087e61; font-size: 10px; font-weight: 700; cursor: pointer; }
 .complete-task-button.reopen { background: #f1f3f7; color: #657085; }
 .overdue-meta { border-color: #f2c7cc !important; background: #fff7f8 !important; }
 .overdue-meta strong { color: #cb3f50; }
+.detail-actions { display: flex; gap: 5px; }
+.series-card { margin: 12px 0; padding: 11px; border: 1px solid #d8e1fb; border-radius: 9px; background: #f6f8ff; }
+.series-card > div:first-child { display: flex; justify-content: space-between; align-items: center; }
+.series-card span { color: #315efb; font-size: 9px; font-weight: 800; }
+.series-card strong { font-size: 10px; }
+.series-card small { display: block; margin: 6px 0 9px; color: #7f8999; font-size: 8px; }
+.series-card > div:last-child { display: flex; gap: 6px; }
+.series-card button { padding: 6px 8px; border: 1px solid #d5dcf1; border-radius: 6px; background: white; color: #526078; font-size: 8px; cursor: pointer; }
+.series-card.ended { background: #f6f7f9; border-color: #e1e4e9; }
+.series-card em { color: #8a93a2; font-size: 8px; font-style: normal; }
 .density-compact .sidebar { gap: 12px; padding-top: 14px; padding-bottom: 14px; }
 .density-compact .nav-group button, .density-compact .project-link { height: 31px; }
 .density-compact .master-task-name, .density-compact .master-track { height: 54px; }

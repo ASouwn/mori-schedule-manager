@@ -7,6 +7,9 @@
 - Outlook 风格月历
 - 创建、编辑和删除任务
 - 创建任务时拆解子任务
+- 最多四级嵌套子任务，支持添加下级、升级、降级和级联完成
+- 任务复制后编辑复用，并可整体平移主任务与子任务日期
+- 日、周、月定时循环任务，支持预估周期、增加周期和提前结束系列
 - 项目级甘特图
 - 任务内部的子任务甘特图
 - 子任务甘特图支持正文、浮窗和主任务展开三种显示方式
@@ -14,6 +17,8 @@
 - 按项目分组的任务列表和详情面板
 - 分类新增、改名、改色、删除和拖动排序
 - 日/周/月时间缩放
+- 子任务长周期自动切换日、周、月刻度并独立横向滚动
+- 短周期任务保持最小可见宽度，兼顾日期准确性与点击操作
 - 甘特图适应任务、本月、本季度与自定义日期范围
 - 甘特图任务隐藏、集中管理、搜索与批量恢复
 - 限定窗口外任务的边缘方向和超出天数提示
@@ -40,7 +45,7 @@
 ├── scripts/
 │   └── build-windows.ps1   # Windows 本机构建脚本
 ├── .github/workflows/
-│   └── build-desktop.yml   # 跨平台构建与 Release 发布
+│   └── build-windows.yml   # GitHub Actions 自动生成 Windows 安装程序
 ├── index.html
 ├── package.json
 └── vite.config.ts
@@ -103,9 +108,6 @@ src-tauri\target\release\bundle\nsis\*-setup.exe
 - `Mori-Windows-x64`：Windows NSIS `.exe` 安装程序
 - `Mori-macOS-arm64`：Apple Silicon Mac `.dmg`
 - `Mori-macOS-x64`：Intel Mac `.dmg`
-
-推送 `v*` 版本标签时，工作流还会自动创建 GitHub Release，并将上述三个平台的
-安装包作为长期下载附件发布。普通 `main` 分支提交只生成保留 30 天的测试产物。
 
 未配置代码签名时，系统首次启动可能显示安全提醒；这不影响安装包生成。
 

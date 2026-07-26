@@ -3,11 +3,20 @@ import { invoke } from "@tauri-apps/api/core";
 
 type Subtask = {
   id: string;
+  parentId?: string;
   title: string;
   start: string;
   end: string;
   done: boolean;
   completedAt?: string;
+};
+
+type RecurrenceRule = {
+  frequency: "daily" | "weekly" | "monthly";
+  interval: number;
+  estimatedCount: number;
+  active: boolean;
+  endedAt?: string;
 };
 
 type Task = {
@@ -21,13 +30,17 @@ type Task = {
   subtasks: Subtask[];
   completedAt?: string;
   showInGantt?: boolean;
+  recurrence?: RecurrenceRule;
+  seriesId?: string;
+  occurrenceIndex?: number;
+  copiedFromId?: string;
 };
 
 type Category = { id: string; name: string; color: string };
 type GanttMode = "body" | "popup" | "expanded";
 type View = "calendar" | "gantt" | "tasks";
 type AppState = {
-  version: 3;
+  version: 4;
   tasks: Task[];
   categories: Category[];
   preferences: {
@@ -64,6 +77,90 @@ const todayKey = toDateKey(today);
 const STORAGE_KEY = "mori-planner.state.v2";
 const LEGACY_STORAGE_KEY = "mori-planner.tasks.v1";
 const colors = ["#315efb", "#8b5cf6", "#10a37f", "#ec4899", "#f59e0b", "#0891b2"];
+
+const descendantsOf = (subtasks: Subtask[], id: string) => {
+  const ids = new Set<string>();
+  const visit = (parentId: string) => {
+    subtasks.filter((sub) => sub.parentId === parentId).forEach((sub) => {
+      ids.add(sub.id);
+      visit(sub.id);
+    });
+  };
+  visit(id);
+  return ids;
+};
+
+const subtaskDepth = (subtasks: Subtask[], subtask: Subtask) => {
+  let depth = 0;
+  let parentId = subtask.parentId;
+  const visited = new Set<string>();
+  while (parentId && depth < 4 && !visited.has(parentId)) {
+    visited.add(parentId);
+    depth += 1;
+    parentId = subtasks.find((item) => item.id === parentId)?.parentId;
+  }
+  return depth;
+};
+
+const leafSubtasks = (subtasks: Subtask[]) => {
+  const parentIds = new Set(subtasks.map((sub) => sub.parentId).filter(Boolean));
+  return subtasks.filter((sub) => !parentIds.has(sub.id));
+};
+
+const normalizeParentCompletion = (subtasks: Subtask[]) => {
+  const next = subtasks.map((sub) => ({ ...sub }));
+  for (let pass = 0; pass < 5; pass += 1) {
+    next.forEach((parent) => {
+      const children = next.filter((child) => child.parentId === parent.id);
+      if (!children.length) return;
+      const done = children.every((child) => child.done);
+      parent.start = children.reduce((min, child) => child.start < min ? child.start : min, children[0].start);
+      parent.end = children.reduce((max, child) => child.end > max ? child.end : max, children[0].end);
+      parent.done = done;
+      parent.completedAt = done ? parent.completedAt ?? todayKey : undefined;
+    });
+  }
+  return next;
+};
+
+const shiftDate = (key: string, frequency: RecurrenceRule["frequency"], interval: number, occurrence: number) => {
+  const date = new Date(`${key}T12:00:00`);
+  const amount = interval * occurrence;
+  if (frequency === "daily") date.setDate(date.getDate() + amount);
+  if (frequency === "weekly") date.setDate(date.getDate() + amount * 7);
+  if (frequency === "monthly") {
+    const originalDay = date.getDate();
+    date.setDate(1);
+    date.setMonth(date.getMonth() + amount);
+    const lastDay = new Date(date.getFullYear(), date.getMonth() + 1, 0).getDate();
+    date.setDate(Math.min(originalDay, lastDay));
+  }
+  return toDateKey(date);
+};
+
+const cloneOccurrence = (source: Task, occurrenceIndex: number, seriesId: string): Task => {
+  const rule = source.recurrence!;
+  const idMap = new Map(source.subtasks.map((sub) => [sub.id, uid()]));
+  return {
+    ...source,
+    id: occurrenceIndex === 1 ? source.id : uid(),
+    title: `${source.title.replace(/ · 第 \d+ 期$/, "")} · 第 ${occurrenceIndex} 期`,
+    start: shiftDate(source.start, rule.frequency, rule.interval, occurrenceIndex - 1),
+    end: shiftDate(source.end, rule.frequency, rule.interval, occurrenceIndex - 1),
+    completedAt: undefined,
+    seriesId,
+    occurrenceIndex,
+    subtasks: source.subtasks.map((sub) => ({
+      ...sub,
+      id: idMap.get(sub.id)!,
+      parentId: sub.parentId ? idMap.get(sub.parentId) : undefined,
+      start: shiftDate(sub.start, rule.frequency, rule.interval, occurrenceIndex - 1),
+      end: shiftDate(sub.end, rule.frequency, rule.interval, occurrenceIndex - 1),
+      done: false,
+      completedAt: undefined,
+    })),
+  };
+};
 
 const defaultCategories: Category[] = [
   { id: "product", name: "产品", color: "#315efb" },
@@ -118,7 +215,7 @@ const seedTasks: Task[] = [
 ];
 
 const initialState: AppState = {
-  version: 3,
+  version: 4,
   tasks: seedTasks,
   categories: defaultCategories,
   preferences: {
@@ -139,13 +236,22 @@ const normalizeTasks = (tasks: Task[]) =>
   tasks.map((task) => {
     const subtasks = (task.subtasks ?? []).map((sub) => ({
       ...sub,
+      parentId: sub.parentId || undefined,
       completedAt: sub.done ? sub.completedAt ?? sub.end : undefined,
     }));
-    const done = subtasks.length > 0 && subtasks.every((sub) => sub.done);
+    const leaves = leafSubtasks(subtasks);
+    const done = leaves.length > 0 && leaves.every((sub) => sub.done);
     return {
       ...task,
       showInGantt: task.showInGantt !== false,
       subtasks,
+      occurrenceIndex: task.occurrenceIndex ?? (task.seriesId ? 1 : undefined),
+      recurrence: task.recurrence ? {
+        ...task.recurrence,
+        interval: Math.max(task.recurrence.interval || 1, 1),
+        estimatedCount: Math.max(task.recurrence.estimatedCount || 1, 1),
+        active: task.recurrence.active !== false,
+      } : undefined,
       completedAt: done ? task.completedAt ?? subtasks.reduce((max, sub) => (sub.completedAt ?? sub.end) > max ? (sub.completedAt ?? sub.end) : max, task.start) : undefined,
     };
   });
@@ -162,7 +268,7 @@ function migrateState(value: unknown): AppState {
   if (value && typeof value === "object" && "tasks" in value) {
     const saved = value as Partial<AppState>;
     return {
-      version: 3,
+      version: 4,
       tasks: Array.isArray(saved.tasks) ? normalizeTasks(saved.tasks) : seedTasks,
       categories: Array.isArray(saved.categories) && saved.categories.length ? saved.categories : defaultCategories,
       preferences: {
@@ -201,8 +307,8 @@ async function saveState(state: AppState) {
 }
 
 const progressOf = (task: Task) =>
-  task.subtasks.length
-    ? Math.round((task.subtasks.filter((item) => item.done).length / task.subtasks.length) * 100)
+  leafSubtasks(task.subtasks).length
+    ? Math.round((leafSubtasks(task.subtasks).filter((item) => item.done).length / leafSubtasks(task.subtasks).length) * 100)
     : 0;
 
 const effectiveEndOf = (task: Task) =>
@@ -272,10 +378,10 @@ export default function App() {
     tasks.find((task) => task.id === selectedTaskId) ?? filteredTasks[0] ?? tasks[0] ?? null;
   const popupTask = tasks.find((task) => task.id === popupTaskId) ?? null;
   const completed = filteredTasks.reduce(
-    (sum, task) => sum + task.subtasks.filter((item) => item.done).length,
+    (sum, task) => sum + leafSubtasks(task.subtasks).filter((item) => item.done).length,
     0,
   );
-  const totalSubtasks = filteredTasks.reduce((sum, task) => sum + task.subtasks.length, 0);
+  const totalSubtasks = filteredTasks.reduce((sum, task) => sum + leafSubtasks(task.subtasks).length, 0);
 
   const calendarDays = useMemo(() => {
     const first = new Date(currentMonth.getFullYear(), currentMonth.getMonth(), 1);
@@ -296,12 +402,17 @@ export default function App() {
     updateTasks((items) =>
       items.map((task) => {
         if (task.id !== taskId) return task;
-        const subtasks = task.subtasks.map((sub) =>
-          sub.id === subtaskId
-            ? { ...sub, done: !sub.done, completedAt: !sub.done ? todayKey : undefined }
+        const target = task.subtasks.find((sub) => sub.id === subtaskId);
+        if (!target) return task;
+        const nextDone = !target.done;
+        const descendants = descendantsOf(task.subtasks, subtaskId);
+        const subtasks = normalizeParentCompletion(task.subtasks.map((sub) =>
+          sub.id === subtaskId || descendants.has(sub.id)
+            ? { ...sub, done: nextDone, completedAt: nextDone ? todayKey : undefined }
             : sub,
-        );
-        const done = subtasks.length > 0 && subtasks.every((sub) => sub.done);
+        ));
+        const leaves = leafSubtasks(subtasks);
+        const done = leaves.length > 0 && leaves.every((sub) => sub.done);
         return { ...task, subtasks, completedAt: done ? task.completedAt ?? todayKey : undefined };
       }),
     );
@@ -399,13 +510,21 @@ export default function App() {
 
   const saveTask = (task: Task) => {
     const category = categories.find((item) => item.name === task.project);
-    const normalized = { ...task, color: category?.color ?? task.color };
+    const normalized = { ...task, color: category?.color ?? task.color, subtasks: normalizeParentCompletion(task.subtasks) };
+    const isExisting = tasks.some((item) => item.id === normalized.id);
+    const newSeries = !isExisting && normalized.recurrence?.active && normalized.recurrence.estimatedCount > 1;
+    const seriesId = normalized.seriesId ?? normalized.id;
+    const generated = newSeries
+      ? Array.from({ length: normalized.recurrence!.estimatedCount }, (_, index) =>
+          cloneOccurrence({ ...normalized, seriesId }, index + 1, seriesId),
+        )
+      : [normalized];
     updateTasks((items) =>
-      items.some((item) => item.id === normalized.id)
+      isExisting
         ? items.map((item) => (item.id === normalized.id ? normalized : item))
-        : [...items, normalized],
+        : [...items, ...generated],
     );
-    setSelectedTaskId(normalized.id);
+    setSelectedTaskId(generated[0].id);
     setModalOpen(false);
     setToast("任务与偏好已保存到本机");
     window.setTimeout(() => setToast(""), 2200);
@@ -428,6 +547,56 @@ export default function App() {
       subtasks: [{ id: uid(), title: "", start: date, end: plusDays(date, 1), done: false }],
     });
     setModalOpen(true);
+  };
+
+  const openCopy = (task: Task) => {
+    const idMap = new Map(task.subtasks.map((sub) => [sub.id, uid()]));
+    setEditing({
+      ...structuredClone(task),
+      id: uid(),
+      title: `${task.title}（副本）`,
+      completedAt: undefined,
+      recurrence: undefined,
+      seriesId: undefined,
+      occurrenceIndex: undefined,
+      copiedFromId: task.id,
+      subtasks: task.subtasks.map((sub) => ({
+        ...sub,
+        id: idMap.get(sub.id)!,
+        parentId: sub.parentId ? idMap.get(sub.parentId) : undefined,
+        done: false,
+        completedAt: undefined,
+      })),
+    });
+    setModalOpen(true);
+  };
+
+  const extendSeries = (task: Task) => {
+    if (!task.seriesId || !task.recurrence) return;
+    const series = tasks.filter((item) => item.seriesId === task.seriesId);
+    const nextIndex = Math.max(...series.map((item) => item.occurrenceIndex ?? 1)) + 1;
+    const source = series.find((item) => item.occurrenceIndex === 1) ?? task;
+    const next = cloneOccurrence({ ...source, recurrence: { ...(source.recurrence ?? task.recurrence), estimatedCount: nextIndex } }, nextIndex, task.seriesId);
+    updateTasks((items) => [
+      ...items.map((item) => item.seriesId === task.seriesId && item.recurrence
+        ? { ...item, recurrence: { ...item.recurrence, estimatedCount: nextIndex, active: true } }
+        : item),
+      next,
+    ]);
+    setSelectedTaskId(next.id);
+    setToast(`已增加第 ${nextIndex} 期`);
+    window.setTimeout(() => setToast(""), 2200);
+  };
+
+  const endSeries = (task: Task) => {
+    if (!task.seriesId || !window.confirm("提前结束整个循环？今天之后尚未开始的周期将移除，历史周期会保留。")) return;
+    updateTasks((items) => items
+      .filter((item) => item.seriesId !== task.seriesId || item.start <= todayKey || item.completedAt)
+      .map((item) => item.seriesId === task.seriesId && item.recurrence
+        ? { ...item, recurrence: { ...item.recurrence, active: false, endedAt: todayKey } }
+        : item));
+    setToast("循环任务已提前结束");
+    window.setTimeout(() => setToast(""), 2200);
   };
 
   const openTask = (id: string) => {
@@ -602,13 +771,18 @@ export default function App() {
         <aside className="detail-panel">
           <div className="detail-header">
             <span>{view === "tasks" ? "任务细节" : "当前任务"}</span>
-            {selectedTask && <button aria-label="编辑任务" onClick={() => { setEditing(structuredClone(selectedTask)); setModalOpen(true); }}>✎</button>}
+            {selectedTask && <div className="detail-actions">
+              <button aria-label="复制任务" title="复制并编辑" onClick={() => openCopy(selectedTask)}>⧉</button>
+              <button aria-label="编辑任务" onClick={() => { setEditing(structuredClone(selectedTask)); setModalOpen(true); }}>✎</button>
+            </div>}
           </div>
           {selectedTask ? (
             <TaskDetail
               task={selectedTask}
               onToggle={(id) => toggleSubtask(selectedTask.id, id)}
               onComplete={(completed) => setTaskCompleted(selectedTask.id, completed)}
+              onExtendSeries={() => extendSeries(selectedTask)}
+              onEndSeries={() => endSeries(selectedTask)}
               showGantt={view !== "gantt"}
             />
           ) : (
@@ -751,7 +925,14 @@ function CalendarView({ days, month, tasks, selectedDate, onSelectDate, onOpenTa
   );
 }
 
-function TaskDetail({ task, onToggle, onComplete, showGantt = true }: { task: Task; onToggle: (id: string) => void; onComplete: (completed: boolean) => void; showGantt?: boolean }) {
+function TaskDetail({ task, onToggle, onComplete, onExtendSeries, onEndSeries, showGantt = true }: {
+  task: Task;
+  onToggle: (id: string) => void;
+  onComplete: (completed: boolean) => void;
+  onExtendSeries: () => void;
+  onEndSeries: () => void;
+  showGantt?: boolean;
+}) {
   const progress = progressOf(task);
   const overdue = overdueDays(task);
   return (
@@ -760,6 +941,14 @@ function TaskDetail({ task, onToggle, onComplete, showGantt = true }: { task: Ta
       <span className="project-badge">{task.project}</span>
       <h2>{task.title}</h2>
       <p className="task-notes">{task.notes || "还没有添加任务备注。"}</p>
+      {task.seriesId && task.recurrence && (
+        <div className={`series-card ${task.recurrence.active ? "" : "ended"}`}>
+          <div><span>循环任务</span><strong>第 {task.occurrenceIndex ?? 1} / {task.recurrence.estimatedCount} 期</strong></div>
+          <small>{task.recurrence.frequency === "daily" ? "每日" : task.recurrence.frequency === "weekly" ? "每周" : "每月"}，间隔 {task.recurrence.interval} 个周期</small>
+          {task.recurrence.active && <div><button onClick={onExtendSeries}>＋ 增加一期</button><button onClick={onEndSeries}>提前结束循环</button></div>}
+          {!task.recurrence.active && <em>系列已结束</em>}
+        </div>
+      )}
       <div className="meta-grid">
         <div><span>开始日期</span><strong>{task.start}</strong></div>
         <div><span>计划结束</span><strong>{task.end}</strong></div>
@@ -779,38 +968,64 @@ function TaskDetail({ task, onToggle, onComplete, showGantt = true }: { task: Ta
 function SubtaskChecklist({ task, onToggle }: { task: Task; onToggle: (id: string) => void }) {
   return (
     <div className="subtasks">
-      {task.subtasks.map((subtask) => (
-        <button key={subtask.id} onClick={() => onToggle(subtask.id)}>
+      {task.subtasks.map((subtask) => {
+        const depth = subtaskDepth(task.subtasks, subtask);
+        const hasChildren = task.subtasks.some((item) => item.parentId === subtask.id);
+        return (
+        <button key={subtask.id} onClick={() => onToggle(subtask.id)} style={{ "--depth": depth } as React.CSSProperties}>
+          {depth > 0 && <span className="tree-guide">└</span>}
           <i className={subtask.done ? "checked" : ""}>{subtask.done ? "✓" : ""}</i>
-          <span><b>{subtask.title || "未命名步骤"}</b><small>{subtask.start.slice(5)} → {subtask.end.slice(5)}</small></span>
+          <span><b>{subtask.title || "未命名步骤"}{hasChildren ? " ▾" : ""}</b><small>{subtask.start.slice(5)} → {subtask.end.slice(5)}</small></span>
         </button>
-      ))}
+      )})}
       {!task.subtasks.length && <p className="empty-inline">尚未拆解子任务</p>}
     </div>
   );
 }
 
 function MiniGantt({ task, large = false }: { task: Task; large?: boolean }) {
-  const range = Math.max(dayDiff(task.start, task.end) + 1, 1);
-  const days = Array.from({ length: range }, (_, i) => plusDays(task.start, i));
+  const naturalStart = [task.start, ...task.subtasks.map((sub) => sub.start)].reduce((min, date) => date < min ? date : min, task.start);
+  const naturalEnd = [effectiveEndOf(task), ...task.subtasks.map(effectiveSubtaskEnd)].reduce((max, date) => date > max ? date : max, task.end);
+  const start = naturalStart;
+  const end = plusDays(naturalEnd, 3);
+  const range = Math.max(dayDiff(start, end) + 1, 1);
+  const scale = range <= 31 ? "day" : range <= 180 ? "week" : "month";
+  const dayWidth = scale === "day" ? (large ? 28 : 18) : scale === "week" ? 9 : 4;
+  const timelineWidth = Math.max(range * dayWidth, large ? 430 : 250);
+  const days = Array.from({ length: range }, (_, i) => plusDays(start, i));
+  const ticks = days.filter((day, index) =>
+    scale === "day" ? index % (range > 18 ? 2 : 1) === 0
+      : scale === "week" ? index % 7 === 0
+        : new Date(`${day}T12:00:00`).getDate() === 1,
+  );
   return (
     <div className={`mini-gantt ${large ? "large" : ""}`}>
-      <div className="gantt-caption"><strong>子任务时间线</strong><span>{range} 天</span></div>
-      <div className="mini-days">{days.map((day) => <span key={day}>{new Date(`${day}T12:00:00`).getDate()}</span>)}</div>
+      <div className="gantt-caption"><strong>子任务时间线</strong><span>{range} 天 · {scale === "day" ? "日刻度" : scale === "week" ? "周刻度" : "月刻度"}</span></div>
+      <div className="mini-scroll">
+        <div className="mini-timeline" style={{ "--mini-width": `${timelineWidth}px`, "--mini-day": `${dayWidth}px` } as React.CSSProperties}>
+          <div className="mini-days">
+            {ticks.map((day) => {
+              const date = new Date(`${day}T12:00:00`);
+              return <span key={day} style={{ left: `${dayDiff(start, day) * dayWidth}px` }}>{scale === "month" ? `${date.getMonth() + 1}月` : `${date.getMonth() + 1}/${date.getDate()}`}</span>;
+            })}
+          </div>
       {task.subtasks.map((sub) => {
-        const left = Math.max(dayDiff(task.start, sub.start), 0);
+        const left = Math.max(dayDiff(start, sub.start), 0);
         const width = Math.max(dayDiff(sub.start, effectiveSubtaskEnd(sub)) + 1, 1);
+        const depth = subtaskDepth(task.subtasks, sub);
         return (
           <div className="mini-row" key={sub.id}>
-            <span title={sub.title}>{sub.title || "未命名"}</span>
-            <div className="mini-track" style={{ "--cols": range } as React.CSSProperties}>
-              <i style={{ background: sub.done ? "#10a37f" : task.color, left: `${(left / range) * 100}%`, width: `${(width / range) * 100}%` }}>
+            <span title={sub.title} style={{ paddingLeft: `${depth * 14}px` }}>{depth ? "└ " : ""}{sub.title || "未命名"}</span>
+            <div className="mini-track">
+              <i className={width * dayWidth < 18 ? "short-bar" : ""} style={{ background: sub.done ? "#10a37f" : task.color, left: `${left * dayWidth}px`, width: `${Math.max(width * dayWidth, 12)}px` }}>
                 {large && <em>{sub.done ? "已完成" : sub.title}</em>}
               </i>
             </div>
           </div>
         );
       })}
+        </div>
+      </div>
     </div>
   );
 }
@@ -867,7 +1082,7 @@ function MasterGantt({ tasks, onSelect, selectedId, mode, zoom, rangeMode, custo
   const todayLeft = dayDiff(start, todayKey) * dayWidth;
   const outsideTasks = tasks.filter((task) => task.start < start || effectiveEndOf(task) > end);
   return (
-    <div className={`master-gantt ${mode === "expanded" ? "expanded-mode" : ""}`} style={{ "--timeline-width": `${timelineWidth}px`, "--day-width": `${dayWidth}px` } as React.CSSProperties}>
+    <div className={`master-gantt ${mode === "expanded" ? "expanded-mode" : ""}`} style={{ "--timeline-width": `${timelineWidth}px`, "--day-width": `${dayWidth}px`, "--task-count": Math.max(tasks.length, 1) } as React.CSSProperties}>
       <div className="gantt-table-head" style={{ width: `${190 + timelineWidth}px` }}>
         <div className="sticky-task-head">
           任务与项目
@@ -910,10 +1125,15 @@ function MasterGantt({ tasks, onSelect, selectedId, mode, zoom, rangeMode, custo
             </div>
             <div className="master-track" style={{ width: `${timelineWidth}px`, backgroundSize: `${dayWidth}px 100%` }}>
               {todayLeft >= 0 && todayLeft <= timelineWidth && <i className="today-line row-line" style={{ left: `${todayLeft}px` }} />}
-              <i className={`main-bar ${!overlaps ? "outside-bar" : ""}`} style={{ background: task.color, left: `${left}px`, width: `${effectiveWidth}px` }}>
+              <i
+                title={`${task.title} · ${task.start} → ${taskEffectiveEnd}`}
+                className={`main-bar ${!overlaps ? "outside-bar" : ""} ${effectiveWidth < 18 ? "short-bar" : ""}`}
+                style={{ background: task.color, left: `${left}px`, width: `${Math.max(effectiveWidth, 14)}px` }}
+              >
                 <em style={{ width: `${progress}%` }} />
                 {mode === "expanded" && expandedTaskIds.includes(task.id) && <strong>{task.title}</strong>}
               </i>
+              {overlaps && effectiveWidth < 50 && <span className="short-task-label" style={{ left: `${left + Math.max(effectiveWidth, 14) + 5}px` }}>{task.title}</span>}
               {clipsLeft && <span className="range-clip left">◀ {dayDiff(task.start, start)}天</span>}
               {clipsRight && <span className="range-clip right">+{dayDiff(end, taskEffectiveEnd)}天 ▶</span>}
               {overlaps && effectiveWidth > plannedWidth && task.end >= start && <i className="extension-bar" style={{ left: `${Math.max(dayDiff(start, task.end) + 1, 0) * dayWidth}px`, width: `${Math.max(dayDiff(task.end, visibleEnd), 0) * dayWidth}px` }} />}
@@ -930,6 +1150,7 @@ function MasterGantt({ tasks, onSelect, selectedId, mode, zoom, rangeMode, custo
                       left: `${subLeft}px`,
                       width: `${subWidth}px`,
                       top: `${52 + index * 24}px`,
+                      paddingLeft: `${6 + subtaskDepth(task.subtasks, sub) * 10}px`,
                     }}
                   >
                     {sub.title || "未命名"}
@@ -962,7 +1183,7 @@ function ProjectTaskList({ categories, tasks, onSelect, selectedId }: { categori
             {group.tasks.map((task) => (
               <button key={task.id} className={`${selectedId === task.id ? "selected" : ""} ${overdueDays(task) ? "overdue-list-item" : ""}`} onClick={() => onSelect(task.id)}>
                 <i className="task-status" style={{ borderColor: task.color }}>{progressOf(task) === 100 ? "✓" : ""}</i>
-                <span className="task-list-copy"><b>{task.title}</b><small>{task.notes || "暂无说明"}</small></span>
+                <span className="task-list-copy"><b>{task.seriesId ? "↻ " : ""}{task.title}</b><small>{task.seriesId ? `循环任务 · 第 ${task.occurrenceIndex ?? 1} 期` : task.notes || "暂无说明"}</small></span>
                 <span className="task-dates">{task.start.slice(5)}<b>→</b>{effectiveEndOf(task).slice(5)}{overdueDays(task) ? <small>逾期{overdueDays(task)}天</small> : null}</span>
                 <span className="list-progress"><i style={{ width: `${progressOf(task)}%`, background: task.color }} /></span>
                 <strong>{progressOf(task)}%</strong>
@@ -1088,8 +1309,26 @@ function TaskModal({ task, categories, onCreateCategory, onClose, onSave, onDele
   const [draft, setDraft] = useState(task);
   const [creatingCategory, setCreatingCategory] = useState(false);
   const [newCategory, setNewCategory] = useState("");
+  const [shiftChildrenWithTask, setShiftChildrenWithTask] = useState(Boolean(task.copiedFromId));
   const updateSub = (id: string, patch: Partial<Subtask>) =>
     setDraft((value) => ({ ...value, subtasks: value.subtasks.map((sub) => sub.id === id ? { ...sub, ...patch } : sub) }));
+  const addChild = (parent: Subtask) => {
+    const index = draft.subtasks.findIndex((sub) => sub.id === parent.id);
+    const child = { id: uid(), parentId: parent.id, title: "", start: parent.start, end: parent.end, done: false };
+    const subtasks = [...draft.subtasks];
+    subtasks.splice(index + 1, 0, child);
+    setDraft({ ...draft, subtasks });
+  };
+  const changeDepth = (subtask: Subtask, direction: "in" | "out") => {
+    if (direction === "out") {
+      const parent = draft.subtasks.find((item) => item.id === subtask.parentId);
+      updateSub(subtask.id, { parentId: parent?.parentId });
+      return;
+    }
+    const index = draft.subtasks.findIndex((item) => item.id === subtask.id);
+    const previous = [...draft.subtasks.slice(0, index)].reverse().find((item) => item.parentId === subtask.parentId);
+    if (previous && subtaskDepth(draft.subtasks, previous) < 3) updateSub(subtask.id, { parentId: previous.id });
+  };
   const addCategory = () => {
     const category = onCreateCategory(newCategory);
     if (!category) return;
@@ -1129,7 +1368,16 @@ function TaskModal({ task, categories, onCreateCategory, onClose, onSave, onDele
               <option value="__new__">＋ 新建分类…</option>
             </select>
           </label>
-          <label><span>开始</span><input type="date" value={draft.start} onChange={(e) => setDraft({ ...draft, start: e.target.value })} /></label>
+          <label><span>开始</span><input type="date" value={draft.start} onChange={(e) => {
+            const nextStart = e.target.value;
+            const offset = dayDiff(draft.start, nextStart);
+            setDraft({
+              ...draft,
+              start: nextStart,
+              end: shiftChildrenWithTask ? plusDays(draft.end, offset) : draft.end,
+              subtasks: shiftChildrenWithTask ? draft.subtasks.map((sub) => ({ ...sub, start: plusDays(sub.start, offset), end: plusDays(sub.end, offset) })) : draft.subtasks,
+            });
+          }} /></label>
           <label><span>结束</span><input type="date" value={draft.end} onChange={(e) => setDraft({ ...draft, end: e.target.value })} /></label>
         </div>
         {creatingCategory && (
@@ -1144,6 +1392,28 @@ function TaskModal({ task, categories, onCreateCategory, onClose, onSave, onDele
           <span>备注</span>
           <textarea value={draft.notes} onChange={(e) => setDraft({ ...draft, notes: e.target.value })} placeholder="写下背景、目标或完成标准…" />
         </label>
+        {task.copiedFromId && (
+          <label className="shift-copy-setting">
+            <input type="checkbox" checked={shiftChildrenWithTask} onChange={(event) => setShiftChildrenWithTask(event.target.checked)} />
+            <span><b>修改开始日期时整体平移</b><small>主任务、结束日期和所有嵌套子任务一起移动</small></span>
+          </label>
+        )}
+        <div className="recurrence-editor">
+          <div className="breakdown-head">
+            <div><span>定时循环</span><small>按预计周期生成可独立完成的任务</small></div>
+            <label className="switch-inline"><input type="checkbox" checked={Boolean(draft.recurrence)} onChange={(event) => setDraft({
+              ...draft,
+              recurrence: event.target.checked ? { frequency: "weekly", interval: 1, estimatedCount: 4, active: true } : undefined,
+            })} /> 启用</label>
+          </div>
+          {draft.recurrence && (
+            <div className="recurrence-fields">
+              <label><span>频率</span><select value={draft.recurrence.frequency} onChange={(event) => setDraft({ ...draft, recurrence: { ...draft.recurrence!, frequency: event.target.value as RecurrenceRule["frequency"] } })}><option value="daily">每天</option><option value="weekly">每周</option><option value="monthly">每月</option></select></label>
+              <label><span>间隔</span><input type="number" min="1" max="99" value={draft.recurrence.interval} onChange={(event) => setDraft({ ...draft, recurrence: { ...draft.recurrence!, interval: Math.max(Number(event.target.value), 1) } })} /></label>
+              <label><span>预估周期数</span><input type="number" min="1" max="365" value={draft.recurrence.estimatedCount} onChange={(event) => setDraft({ ...draft, recurrence: { ...draft.recurrence!, estimatedCount: Math.max(Number(event.target.value), 1) } })} /></label>
+            </div>
+          )}
+        </div>
         <div className="color-picker"><span>任务颜色</span>{colors.map((color) => <button type="button" key={color} className={draft.color === color ? "selected" : ""} style={{ background: color }} onClick={() => setDraft({ ...draft, color })} />)}</div>
         <label className="gantt-visibility-setting">
           <span><b>在任务甘特图中显示</b><small>关闭后任务仍保留在日历、项目列表和搜索中</small></span>
@@ -1155,13 +1425,21 @@ function TaskModal({ task, categories, onCreateCategory, onClose, onSave, onDele
         </div>
         <div className="subtask-editor">
           {draft.subtasks.map((sub, index) => (
-            <div className="subtask-edit-row" key={sub.id}>
+            <div className="subtask-edit-row" key={sub.id} style={{ "--depth": subtaskDepth(draft.subtasks, sub) } as React.CSSProperties}>
               <span className="step-number">{pad(index + 1)}</span>
               <input aria-label={`步骤 ${index + 1} 名称`} value={sub.title} onChange={(e) => updateSub(sub.id, { title: e.target.value })} placeholder="填写具体行动" />
               <input aria-label="开始日期" type="date" value={sub.start} onChange={(e) => updateSub(sub.id, { start: e.target.value })} />
               <span>→</span>
               <input aria-label="结束日期" type="date" value={sub.end} onChange={(e) => updateSub(sub.id, { end: e.target.value })} />
-              <button type="button" aria-label="删除步骤" onClick={() => setDraft({ ...draft, subtasks: draft.subtasks.filter((item) => item.id !== sub.id) })}>×</button>
+              <div className="subtask-row-actions">
+                <button type="button" title="添加下级" onClick={() => addChild(sub)}>＋</button>
+                <button type="button" title="降级" disabled={index === 0 || subtaskDepth(draft.subtasks, sub) >= 3} onClick={() => changeDepth(sub, "in")}>→</button>
+                <button type="button" title="升级" disabled={!sub.parentId} onClick={() => changeDepth(sub, "out")}>←</button>
+                <button type="button" aria-label="删除步骤" onClick={() => {
+                  const descendants = descendantsOf(draft.subtasks, sub.id);
+                  setDraft({ ...draft, subtasks: draft.subtasks.filter((item) => item.id !== sub.id && !descendants.has(item.id)) });
+                }}>×</button>
+              </div>
             </div>
           ))}
         </div>
