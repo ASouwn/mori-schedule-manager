@@ -34,6 +34,8 @@ type Task = {
   seriesId?: string;
   occurrenceIndex?: number;
   copiedFromId?: string;
+  starred?: boolean;
+  ganttOrder?: number;
 };
 
 type Category = { id: string; name: string; color: string };
@@ -233,7 +235,7 @@ const initialState: AppState = {
 };
 
 const normalizeTasks = (tasks: Task[]) =>
-  tasks.map((task) => {
+  tasks.map((task, index) => {
     const subtasks = (task.subtasks ?? []).map((sub) => ({
       ...sub,
       parentId: sub.parentId || undefined,
@@ -244,6 +246,8 @@ const normalizeTasks = (tasks: Task[]) =>
     return {
       ...task,
       showInGantt: task.showInGantt !== false,
+      starred: task.starred === true,
+      ganttOrder: Number.isFinite(task.ganttOrder) ? task.ganttOrder : index,
       subtasks,
       occurrenceIndex: task.occurrenceIndex ?? (task.seriesId ? 1 : undefined),
       recurrence: task.recurrence ? {
@@ -371,7 +375,12 @@ export default function App() {
           task.notes.toLowerCase().includes(query)),
     );
   }, [tasks, selectedProject, search]);
-  const ganttTasks = useMemo(() => filteredTasks.filter((task) => task.showInGantt !== false), [filteredTasks]);
+  const ganttTasks = useMemo(
+    () => filteredTasks
+      .filter((task) => task.showInGantt !== false)
+      .sort((a, b) => (a.ganttOrder ?? 0) - (b.ganttOrder ?? 0)),
+    [filteredTasks],
+  );
   const hiddenTasks = useMemo(() => tasks.filter((task) => task.showInGantt === false), [tasks]);
 
   const selectedTask =
@@ -397,6 +406,21 @@ export default function App() {
 
   const updateTasks = (updater: (items: Task[]) => Task[]) =>
     setAppState((state) => ({ ...state, tasks: updater(state.tasks) }));
+
+  const reorderGanttTasks = (sourceId: string, targetId: string) =>
+    updateTasks((items) => {
+      const ordered = [...items].sort((a, b) => (a.ganttOrder ?? 0) - (b.ganttOrder ?? 0));
+      const source = ordered.findIndex((task) => task.id === sourceId);
+      const target = ordered.findIndex((task) => task.id === targetId);
+      if (source < 0 || target < 0 || source === target) return items;
+      const [moved] = ordered.splice(source, 1);
+      ordered.splice(target, 0, moved);
+      const orderById = new Map(ordered.map((task, index) => [task.id, index]));
+      return items.map((task) => ({ ...task, ganttOrder: orderById.get(task.id) ?? task.ganttOrder }));
+    });
+
+  const toggleTaskStar = (taskId: string) =>
+    updateTasks((items) => items.map((task) => task.id === taskId ? { ...task, starred: !task.starred } : task));
 
   const toggleSubtask = (taskId: string, subtaskId: string) =>
     updateTasks((items) =>
@@ -544,6 +568,8 @@ export default function App() {
       end: plusDays(date, 3),
       notes: "",
       showInGantt: true,
+      starred: false,
+      ganttOrder: tasks.length,
       subtasks: [{ id: uid(), title: "", start: date, end: plusDays(date, 1), done: false }],
     });
     setModalOpen(true);
@@ -560,6 +586,8 @@ export default function App() {
       seriesId: undefined,
       occurrenceIndex: undefined,
       copiedFromId: task.id,
+      starred: false,
+      ganttOrder: tasks.length,
       subtasks: task.subtasks.map((sub) => ({
         ...sub,
         id: idMap.get(sub.id)!,
@@ -751,6 +779,8 @@ export default function App() {
                 customEnd={preferences.customEnd}
                 expandedTaskIds={preferences.expandedTaskIds}
                 onHide={(id) => updateTasks((items) => items.map((task) => task.id === id ? { ...task, showInGantt: false } : task))}
+                onReorder={reorderGanttTasks}
+                onToggleStar={toggleTaskStar}
               />
               {preferences.ganttMode === "body" && selectedTask && ganttTasks.some((task) => task.id === selectedTask.id) && (
                 <BodyGantt task={selectedTask} onToggle={(id) => toggleSubtask(selectedTask.id, id)} />
@@ -772,6 +802,7 @@ export default function App() {
           <div className="detail-header">
             <span>{view === "tasks" ? "任务细节" : "当前任务"}</span>
             {selectedTask && <div className="detail-actions">
+              <button className={selectedTask.starred ? "starred" : ""} aria-label={selectedTask.starred ? "取消星标" : "添加星标"} title={selectedTask.starred ? "取消星标" : "添加星标"} onClick={() => toggleTaskStar(selectedTask.id)}>★</button>
               <button aria-label="复制任务" title="复制并编辑" onClick={() => openCopy(selectedTask)}>⧉</button>
               <button aria-label="编辑任务" onClick={() => { setEditing(structuredClone(selectedTask)); setModalOpen(true); }}>✎</button>
             </div>}
@@ -1045,7 +1076,7 @@ function BodyGantt({ task, onToggle, compact = false }: { task: Task; onToggle: 
   );
 }
 
-function MasterGantt({ tasks, onSelect, selectedId, mode, zoom, rangeMode, customStart, customEnd, expandedTaskIds, onHide }: {
+function MasterGantt({ tasks, onSelect, selectedId, mode, zoom, rangeMode, customStart, customEnd, expandedTaskIds, onHide, onReorder, onToggleStar }: {
   tasks: Task[];
   onSelect: (id: string) => void;
   selectedId: string;
@@ -1056,6 +1087,8 @@ function MasterGantt({ tasks, onSelect, selectedId, mode, zoom, rangeMode, custo
   customEnd: string;
   expandedTaskIds: string[];
   onHide: (id: string) => void;
+  onReorder: (sourceId: string, targetId: string) => void;
+  onToggleStar: (id: string) => void;
 }) {
   const naturalStart = tasks.length
     ? tasks.flatMap((task) => [task.start, ...task.subtasks.map((sub) => sub.start)]).reduce((min, date) => date < min ? date : min)
@@ -1112,15 +1145,33 @@ function MasterGantt({ tasks, onSelect, selectedId, mode, zoom, rangeMode, custo
           <div
             role="button"
             tabIndex={0}
+            draggable
             className={`master-row ${selectedId === task.id ? "selected" : ""} ${mode === "expanded" && expandedTaskIds.includes(task.id) ? "expanded" : ""} ${overdue ? "overdue" : ""}`}
             key={task.id}
             style={{ "--subtasks": task.subtasks.length, width: `${190 + timelineWidth}px` } as React.CSSProperties}
             onClick={() => onSelect(task.id)}
             onKeyDown={(event) => { if (event.key === "Enter") onSelect(task.id); }}
+            onDragStart={(event) => {
+              event.dataTransfer.effectAllowed = "move";
+              event.dataTransfer.setData("text/gantt-task", task.id);
+              event.currentTarget.classList.add("dragging");
+            }}
+            onDragEnd={(event) => event.currentTarget.classList.remove("dragging")}
+            onDragOver={(event) => {
+              event.preventDefault();
+              event.dataTransfer.dropEffect = "move";
+            }}
+            onDrop={(event) => {
+              event.preventDefault();
+              const sourceId = event.dataTransfer.getData("text/gantt-task");
+              if (sourceId) onReorder(sourceId, task.id);
+            }}
           >
             <div className="master-task-name">
+              <span className="gantt-drag-handle" title="拖动排序">⠿</span>
               <i style={{ background: task.color }} />
               <span><b>{task.title}</b><small>{task.project} · {progress}% {overdue ? `· 逾期${overdue}天` : ""}</small></span>
+              <button className={`task-star ${task.starred ? "active" : ""}`} title={task.starred ? "取消星标" : "添加星标"} onClick={(event) => { event.stopPropagation(); onToggleStar(task.id); }}>★</button>
               <button className="quick-hide-task" title="从甘特图隐藏" onClick={(event) => { event.stopPropagation(); onHide(task.id); }}>隐藏</button>
             </div>
             <div className="master-track" style={{ width: `${timelineWidth}px`, backgroundSize: `${dayWidth}px 100%` }}>
@@ -1183,7 +1234,7 @@ function ProjectTaskList({ categories, tasks, onSelect, selectedId }: { categori
             {group.tasks.map((task) => (
               <button key={task.id} className={`${selectedId === task.id ? "selected" : ""} ${overdueDays(task) ? "overdue-list-item" : ""}`} onClick={() => onSelect(task.id)}>
                 <i className="task-status" style={{ borderColor: task.color }}>{progressOf(task) === 100 ? "✓" : ""}</i>
-                <span className="task-list-copy"><b>{task.seriesId ? "↻ " : ""}{task.title}</b><small>{task.seriesId ? `循环任务 · 第 ${task.occurrenceIndex ?? 1} 期` : task.notes || "暂无说明"}</small></span>
+                <span className="task-list-copy"><b>{task.starred ? "★ " : ""}{task.seriesId ? "↻ " : ""}{task.title}</b><small>{task.seriesId ? `循环任务 · 第 ${task.occurrenceIndex ?? 1} 期` : task.notes || "暂无说明"}</small></span>
                 <span className="task-dates">{task.start.slice(5)}<b>→</b>{effectiveEndOf(task).slice(5)}{overdueDays(task) ? <small>逾期{overdueDays(task)}天</small> : null}</span>
                 <span className="list-progress"><i style={{ width: `${progressOf(task)}%`, background: task.color }} /></span>
                 <strong>{progressOf(task)}%</strong>

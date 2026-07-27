@@ -344,6 +344,13 @@ html, body, #root { width: 100%; height: 100%; overflow: hidden; }
 .gantt-head-days span { position: absolute; top: 0; height: 50px; padding: 8px 2px; border-left: 1px solid var(--line); align-items: flex-start; overflow: hidden; }
 .master-row { display: grid; grid-template-columns: 190px var(--timeline-width); min-width: 0; }
 .master-task-name { position: sticky; left: 0; z-index: 5; width: 190px; background: inherit; }
+.gantt-drag-handle { flex: 0 0 auto; color: #aab2c0; font-size: 12px; cursor: grab; }
+.master-row.dragging { opacity: .45; }
+.master-row[draggable="true"] { cursor: grab; }
+.master-row[draggable="true"]:active { cursor: grabbing; }
+.task-star { flex: 0 0 22px; width: 22px; height: 22px; padding: 0; border: 0; border-radius: 6px; background: transparent; color: #c7ccd5; cursor: pointer; }
+.task-star:hover { background: #fff8df; color: #e6ad20; }
+.task-star.active, .detail-actions button.starred { color: #f0b429; }
 .quick-hide-task { visibility: hidden; margin-left: auto; padding: 4px 6px; border: 0; border-radius: 5px; background: #f0f2f6; color: #7b8596; font-size: 8px; cursor: pointer; }
 .master-row:hover .quick-hide-task { visibility: visible; }
 .master-track { width: var(--timeline-width); background-size: var(--day-width) 100%; overflow: visible; }
