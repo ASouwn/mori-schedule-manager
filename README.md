@@ -2,6 +2,8 @@
 
 基于 Tauri 2、React、TypeScript 和 Vite 的跨平台桌面日程管理工具。
 
+Windows 正式安装版以桌面 GUI 模式启动，不会额外显示 PowerShell 或命令行窗口。
+
 ## 功能
 
 - Outlook 风格月历
