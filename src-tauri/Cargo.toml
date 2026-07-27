@@ -1,6 +1,6 @@
 [package]
 name = "mori-schedule-manager"
-version = "0.6.0"
+version = "0.6.1"
 description = "Mori cross-platform schedule and task manager"
 authors = ["Mori"]
 edition = "2021"

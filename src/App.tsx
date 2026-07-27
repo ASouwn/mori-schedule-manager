@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
 type Subtask = {
@@ -407,14 +407,15 @@ export default function App() {
   const updateTasks = (updater: (items: Task[]) => Task[]) =>
     setAppState((state) => ({ ...state, tasks: updater(state.tasks) }));
 
-  const reorderGanttTasks = (sourceId: string, targetId: string) =>
+  const reorderGanttTasks = (sourceId: string, targetId: string, placement: "before" | "after" = "before") =>
     updateTasks((items) => {
       const ordered = [...items].sort((a, b) => (a.ganttOrder ?? 0) - (b.ganttOrder ?? 0));
       const source = ordered.findIndex((task) => task.id === sourceId);
-      const target = ordered.findIndex((task) => task.id === targetId);
-      if (source < 0 || target < 0 || source === target) return items;
+      if (source < 0 || sourceId === targetId) return items;
       const [moved] = ordered.splice(source, 1);
-      ordered.splice(target, 0, moved);
+      const target = ordered.findIndex((task) => task.id === targetId);
+      if (target < 0) return items;
+      ordered.splice(placement === "after" ? target + 1 : target, 0, moved);
       const orderById = new Map(ordered.map((task, index) => [task.id, index]));
       return items.map((task) => ({ ...task, ganttOrder: orderById.get(task.id) ?? task.ganttOrder }));
     });
@@ -1087,9 +1088,65 @@ function MasterGantt({ tasks, onSelect, selectedId, mode, zoom, rangeMode, custo
   customEnd: string;
   expandedTaskIds: string[];
   onHide: (id: string) => void;
-  onReorder: (sourceId: string, targetId: string) => void;
+  onReorder: (sourceId: string, targetId: string, placement?: "before" | "after") => void;
   onToggleStar: (id: string) => void;
 }) {
+  const ganttRef = useRef<HTMLDivElement>(null);
+  const [dragState, setDragState] = useState<{
+    taskId: string;
+    x: number;
+    y: number;
+    targetId?: string;
+    placement?: "before" | "after";
+  } | null>(null);
+  const draggedTask = dragState ? tasks.find((task) => task.id === dragState.taskId) : undefined;
+
+  useEffect(() => {
+    if (!dragState) return;
+    const cancelDrag = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setDragState(null);
+    };
+    window.addEventListener("keydown", cancelDrag);
+    return () => window.removeEventListener("keydown", cancelDrag);
+  }, [dragState]);
+
+  const updatePointerDrag = (event: React.PointerEvent) => {
+    if (!dragState) return;
+    const root = ganttRef.current;
+    if (root) {
+      const bounds = root.getBoundingClientRect();
+      if (event.clientY < bounds.top + 42) root.scrollBy({ top: -18 });
+      if (event.clientY > bounds.bottom - 42) root.scrollBy({ top: 18 });
+    }
+    const row = document.elementFromPoint(event.clientX, event.clientY)?.closest<HTMLElement>(".master-row[data-task-id]");
+    if (!row || row.dataset.taskId === dragState.taskId) {
+      setDragState((state) => state ? { ...state, x: event.clientX, y: event.clientY, targetId: undefined, placement: undefined } : null);
+      return;
+    }
+    const bounds = row.getBoundingClientRect();
+    setDragState((state) => state ? {
+      ...state,
+      x: event.clientX,
+      y: event.clientY,
+      targetId: row.dataset.taskId,
+      placement: event.clientY < bounds.top + bounds.height / 2 ? "before" : "after",
+    } : null);
+  };
+
+  const finishPointerDrag = () => {
+    if (dragState?.targetId && dragState.placement) {
+      onReorder(dragState.taskId, dragState.targetId, dragState.placement);
+    }
+    setDragState(null);
+  };
+
+  const keyboardReorder = (taskId: string, direction: -1 | 1) => {
+    const index = tasks.findIndex((task) => task.id === taskId);
+    const target = tasks[index + direction];
+    if (!target) return;
+    onReorder(taskId, target.id, direction < 0 ? "before" : "after");
+  };
+
   const naturalStart = tasks.length
     ? tasks.flatMap((task) => [task.start, ...task.subtasks.map((sub) => sub.start)]).reduce((min, date) => date < min ? date : min)
     : todayKey;
@@ -1115,8 +1172,15 @@ function MasterGantt({ tasks, onSelect, selectedId, mode, zoom, rangeMode, custo
   const todayLeft = dayDiff(start, todayKey) * dayWidth;
   const outsideTasks = tasks.filter((task) => task.start < start || effectiveEndOf(task) > end);
   return (
-    <div className={`master-gantt ${mode === "expanded" ? "expanded-mode" : ""}`} style={{ "--timeline-width": `${timelineWidth}px`, "--day-width": `${dayWidth}px`, "--task-count": Math.max(tasks.length, 1) } as React.CSSProperties}>
-      <div className="gantt-table-head" style={{ width: `${190 + timelineWidth}px` }}>
+    <div
+      ref={ganttRef}
+      className={`master-gantt ${mode === "expanded" ? "expanded-mode" : ""} ${dragState ? "is-sorting" : ""}`}
+      style={{ "--timeline-width": `${timelineWidth}px`, "--day-width": `${dayWidth}px`, "--task-count": Math.max(tasks.length, 1) } as React.CSSProperties}
+      onPointerMove={updatePointerDrag}
+      onPointerUp={finishPointerDrag}
+      onPointerCancel={() => setDragState(null)}
+    >
+      <div className="gantt-table-head" style={{ width: `calc(var(--task-column-width) + ${timelineWidth}px)` }}>
         <div className="sticky-task-head">
           任务与项目
           {outsideTasks.length > 0 && <small title={outsideTasks.map((task) => task.title).join("、")}>窗口外 {outsideTasks.length}</small>}
@@ -1145,34 +1209,38 @@ function MasterGantt({ tasks, onSelect, selectedId, mode, zoom, rangeMode, custo
           <div
             role="button"
             tabIndex={0}
-            draggable
-            className={`master-row ${selectedId === task.id ? "selected" : ""} ${mode === "expanded" && expandedTaskIds.includes(task.id) ? "expanded" : ""} ${overdue ? "overdue" : ""}`}
+            data-task-id={task.id}
+            className={`master-row ${selectedId === task.id ? "selected" : ""} ${mode === "expanded" && expandedTaskIds.includes(task.id) ? "expanded" : ""} ${overdue ? "overdue" : ""} ${dragState?.taskId === task.id ? "dragging" : ""} ${dragState?.targetId === task.id ? `drop-${dragState.placement}` : ""}`}
             key={task.id}
-            style={{ "--subtasks": task.subtasks.length, width: `${190 + timelineWidth}px` } as React.CSSProperties}
+            style={{ "--subtasks": task.subtasks.length, width: `calc(var(--task-column-width) + ${timelineWidth}px)` } as React.CSSProperties}
             onClick={() => onSelect(task.id)}
             onKeyDown={(event) => { if (event.key === "Enter") onSelect(task.id); }}
-            onDragStart={(event) => {
-              event.dataTransfer.effectAllowed = "move";
-              event.dataTransfer.setData("text/gantt-task", task.id);
-              event.currentTarget.classList.add("dragging");
-            }}
-            onDragEnd={(event) => event.currentTarget.classList.remove("dragging")}
-            onDragOver={(event) => {
-              event.preventDefault();
-              event.dataTransfer.dropEffect = "move";
-            }}
-            onDrop={(event) => {
-              event.preventDefault();
-              const sourceId = event.dataTransfer.getData("text/gantt-task");
-              if (sourceId) onReorder(sourceId, task.id);
-            }}
           >
             <div className="master-task-name">
-              <span className="gantt-drag-handle" title="拖动排序">⠿</span>
+              <button
+                className="gantt-drag-handle"
+                type="button"
+                title="拖动排序；Alt + ↑/↓ 键盘排序"
+                aria-label={`调整“${task.title}”的顺序`}
+                onClick={(event) => event.stopPropagation()}
+                onKeyDown={(event) => {
+                  if (!event.altKey || (event.key !== "ArrowUp" && event.key !== "ArrowDown")) return;
+                  event.preventDefault();
+                  event.stopPropagation();
+                  keyboardReorder(task.id, event.key === "ArrowUp" ? -1 : 1);
+                }}
+                onPointerDown={(event) => {
+                  if (event.button !== 0) return;
+                  event.preventDefault();
+                  event.stopPropagation();
+                  event.currentTarget.setPointerCapture(event.pointerId);
+                  setDragState({ taskId: task.id, x: event.clientX, y: event.clientY });
+                }}
+              >⠿</button>
               <i style={{ background: task.color }} />
-              <span><b>{task.title}</b><small>{task.project} · {progress}% {overdue ? `· 逾期${overdue}天` : ""}</small></span>
+              <span className="master-task-copy"><b title={task.title}>{task.title}</b><small>{task.project} · {progress}% {overdue ? `· 逾期${overdue}天` : ""}</small></span>
               <button className={`task-star ${task.starred ? "active" : ""}`} title={task.starred ? "取消星标" : "添加星标"} onClick={(event) => { event.stopPropagation(); onToggleStar(task.id); }}>★</button>
-              <button className="quick-hide-task" title="从甘特图隐藏" onClick={(event) => { event.stopPropagation(); onHide(task.id); }}>隐藏</button>
+              <button className="quick-hide-task" title="从甘特图隐藏" aria-label={`隐藏“${task.title}”`} onClick={(event) => { event.stopPropagation(); onHide(task.id); }}>×</button>
             </div>
             <div className="master-track" style={{ width: `${timelineWidth}px`, backgroundSize: `${dayWidth}px 100%` }}>
               {todayLeft >= 0 && todayLeft <= timelineWidth && <i className="today-line row-line" style={{ left: `${todayLeft}px` }} />}
@@ -1212,6 +1280,7 @@ function MasterGantt({ tasks, onSelect, selectedId, mode, zoom, rangeMode, custo
           </div>
         );
       })}
+      {draggedTask && <div className="gantt-drag-preview" style={{ left: dragState!.x + 14, top: dragState!.y + 14 }}><i style={{ background: draggedTask.color }} />{draggedTask.title}</div>}
       {!tasks.length && <div className="gantt-empty">当前项目中还没有任务。</div>}
     </div>
   );
